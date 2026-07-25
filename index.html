@@ -576,7 +576,7 @@
     </div>
 
     <div style="text-align:center; color:var(--ink-soft); font-size:11px; padding:10px 0 24px;">
-      نسخة الكود: 2026-07-19-A
+      نسخة الكود: 2026-07-19-B
     </div>
   </section>
 
@@ -974,6 +974,22 @@
     </div>
   </div>
 </div>
+
+<div class="modal-bg" id="editDebtEntryModal">
+  <div class="modal">
+    <h2 style="margin-top:0; font-size:15px;">تعديل فقرة الدين</h2>
+    <div id="editDebtEntryTypeNote" style="font-weight:700; font-size:13px; margin-bottom:10px; color:var(--ink-soft);"></div>
+    <label for="editDebtEntryAmount">المبلغ (د.ع) *</label>
+    <input type="number" id="editDebtEntryAmount" min="0" step="250" placeholder="المبلغ">
+    <label for="editDebtEntryNoteInput">الوصف / المواد</label>
+    <input type="text" id="editDebtEntryNoteInput" placeholder="مثال: شاحن + سماعة">
+    <div class="modal-actions">
+      <button class="btn btn-ghost" id="cancelEditDebtEntryBtn" type="button">إلغاء</button>
+      <button class="btn btn-main" id="confirmEditDebtEntryBtn" type="button">✅ حفظ</button>
+    </div>
+  </div>
+</div>
+
 
   <!-- ================= DEBTS VIEW ================= -->
   <section class="view" id="view-debts">
@@ -3449,12 +3465,84 @@ window.deleteDebtor = function(debtId){
   });
 };
 
+function recalcDebtorBalance(debtor){
+  debtor.balance = (debtor.history||[]).reduce(function(sum, h){
+    return sum + (h.type==='purchase' ? (h.amount||0) : -(h.amount||0));
+  }, 0);
+}
+
+var pendingEditDebtId = null;
+var pendingEditDebtEntryIndex = null;
+
+window.openEditDebtEntryModal = function(debtId, entryIndex){
+  var debtor = debts.find(function(d){ return d.id===debtId; });
+  if(!debtor) return;
+  var entry = debtor.history[entryIndex];
+  if(!entry) return;
+  pendingEditDebtId = debtId;
+  pendingEditDebtEntryIndex = entryIndex;
+  document.getElementById('editDebtEntryTypeNote').textContent = entry.type==='purchase' ? 'فقرة شراء (دين)' : 'فقرة تسديد';
+  document.getElementById('editDebtEntryAmount').value = entry.amount;
+  document.getElementById('editDebtEntryNoteInput').value = entry.note || '';
+  document.getElementById('editDebtEntryModal').classList.add('show');
+};
+
+document.getElementById('cancelEditDebtEntryBtn').addEventListener('click', function(){
+  pendingEditDebtId = null; pendingEditDebtEntryIndex = null;
+  document.getElementById('editDebtEntryModal').classList.remove('show');
+});
+
+document.getElementById('confirmEditDebtEntryBtn').addEventListener('click', function(){
+  if(pendingEditDebtId==null || pendingEditDebtEntryIndex==null) return;
+  var debtor = debts.find(function(d){ return d.id===pendingEditDebtId; });
+  if(!debtor) return;
+  var entry = debtor.history[pendingEditDebtEntryIndex];
+  if(!entry) return;
+  var amt = parseFloat(document.getElementById('editDebtEntryAmount').value);
+  if(isNaN(amt) || amt < 0){ toast('اكتب مبلغ صحيح', true); return; }
+  entry.amount = amt;
+  entry.note = document.getElementById('editDebtEntryNoteInput').value.trim();
+  recalcDebtorBalance(debtor);
+  saveJSON(DB_DEBTS, debts);
+  document.getElementById('editDebtEntryModal').classList.remove('show');
+  pendingEditDebtId = null; pendingEditDebtEntryIndex = null;
+  renderDebts();
+  toast('تم تعديل الفقرة ✅');
+});
+
+window.deleteDebtEntry = function(debtId, entryIndex){
+  var debtor = debts.find(function(d){ return d.id===debtId; });
+  if(!debtor) return;
+  if((debtor.history||[]).length <= 1){
+    toast('هذي آخر فقرة عند الزبون — لحذفها احذف كل سجل الزبون بدل هذا', true);
+    return;
+  }
+  requireCodeConfirm('حذف هذي الفقرة من سجل "' + debtor.customerName + '"؟', function(){
+    debtor.history.splice(entryIndex, 1);
+    recalcDebtorBalance(debtor);
+    saveJSON(DB_DEBTS, debts);
+    renderDebts();
+    toast('تم حذف الفقرة ✅');
+  });
+};
+
 window.saveDebtorNotes = function(debtId, value){
   var debtor = debts.find(function(d){ return d.id===debtId; });
   if(!debtor) return;
   debtor.notes = value;
   saveJSON(DB_DEBTS, debts);
   toast('تم حفظ الملاحظة ✅');
+};
+
+window.saveDebtorName = function(debtId, value){
+  var debtor = debts.find(function(d){ return d.id===debtId; });
+  if(!debtor) return;
+  value = value.trim();
+  if(!value){ toast('لازم يكون فيه اسم', true); renderDebts(); return; }
+  debtor.customerName = value;
+  saveJSON(DB_DEBTS, debts);
+  renderDebts();
+  toast('تم حفظ الاسم ✅');
 };
 
 window.saveDebtorPhone = function(debtId, value){
@@ -3647,30 +3735,39 @@ function renderDebts(){
   filtered.forEach(function(d){
     var days = oldestUnpaidPurchaseDays(d);
     var isOverdue = days >= OVERDUE_DAYS;
-    var recentHistory = d.history.slice().sort(function(a,b){ return new Date(b.date)-new Date(a.date); }).slice(0,3);
-    var historyHtml = recentHistory.map(function(h){
+    var fullHistory = d.history.map(function(h, idx){ return {h:h, idx:idx}; }).sort(function(a,b){ return new Date(b.h.date)-new Date(a.h.date); });
+    var canDeleteEntry = d.history.length > 1;
+    var historyHtml = fullHistory.map(function(entry){
+      var h = entry.h, idx = entry.idx;
       var hd = new Date(h.date);
-      var label = h.type==='purchase' ? ('شراء: ' + escapeHtml(h.note||'')) : 'تسديد';
+      var label = h.type==='purchase' ? ('شراء: ' + escapeHtml(h.note||'بدون وصف')) : 'تسديد';
       var amt = h.type==='purchase' ? '+'+fmtNum(h.amount) : '-'+fmtNum(h.amount);
-      return '<div class="meta" style="font-size:11px;">' + hd.toLocaleDateString('ar-EG') + ' — ' + label + ' (' + amt + ' د.ع)</div>';
+      return '<div style="display:flex; justify-content:space-between; align-items:center; gap:6px; padding:5px 0; border-bottom:1px dashed var(--line); font-size:11.5px;">' +
+        '<div class="meta">' + hd.toLocaleDateString('ar-EG') + ' — ' + label + ' (' + amt + ' د.ع)</div>' +
+        '<div style="display:flex; gap:4px; flex-shrink:0;">' +
+          (h.type==='purchase' ? '<button class="btn btn-ghost" style="padding:3px 8px; font-size:10.5px;" onclick="openEditDebtEntryModal(\'' + d.id + '\', ' + idx + ')">تعديل</button>' : '') +
+          (canDeleteEntry ? '<button class="btn btn-danger" style="padding:3px 8px; font-size:10.5px;" onclick="deleteDebtEntry(\'' + d.id + '\', ' + idx + ')">حذف</button>' : '') +
+        '</div>' +
+      '</div>';
     }).join('');
 
     html +=
       '<div class="card" style="' + (isOverdue ? 'border-color:var(--danger); background:#fdf1ef;' : '') + '">' +
         '<div style="display:flex; justify-content:space-between; align-items:flex-start; gap:10px; flex-wrap:wrap;">' +
-          '<div>' +
-            '<div style="font-weight:800; font-size:15px;">' + escapeHtml(d.customerName) + '</div>' +
-            (d.phone ? '<div class="meta type-mono" style="margin-top:1px;">📞 ' + escapeHtml(d.phone) + '</div>' : '') +
+          '<div style="flex:1; min-width:140px;">' +
+            '<label style="margin:0 0 4px; font-size:11px;">اسم الزبون</label>' +
+            '<input type="text" style="font-weight:800; font-size:14px;" value="' + escapeHtml(d.customerName) + '" ' +
+              'onchange="saveDebtorName(\'' + d.id + '\', this.value)">' +
             (isOverdue
-              ? '<div style="color:var(--danger); font-weight:700; font-size:12px; margin-top:2px;">⚠️ متأخر ' + days + ' يوم — هذا ما جابلك</div>'
-              : '<div class="meta" style="margin-top:2px;">منذ ' + days + ' يوم</div>') +
+              ? '<div style="color:var(--danger); font-weight:700; font-size:12px; margin-top:4px;">⚠️ متأخر ' + days + ' يوم — هذا ما جابلك</div>'
+              : '<div class="meta" style="margin-top:4px;">منذ ' + days + ' يوم</div>') +
           '</div>' +
           '<div style="text-align:left;">' +
             '<div class="meta" style="font-size:11px;">الرصيد المتبقي</div>' +
             '<div class="type-mono" style="font-size:19px; font-weight:900; color:var(--danger);">' + fmt(d.balance) + '</div>' +
           '</div>' +
         '</div>' +
-        '<div style="margin-top:10px; padding-top:10px; border-top:1px dashed var(--line);">' +
+        '<div style="margin-top:10px; padding-top:10px; border-top:1px dashed var(--line); max-height:220px; overflow-y:auto;">' +
           historyHtml +
         '</div>' +
         '<div class="row" style="margin-top:10px;">' +
@@ -3694,7 +3791,7 @@ function renderDebts(){
         '</div>' +
         '<div class="row" style="margin-top:8px;">' +
           '<button class="btn btn-ghost" type="button" onclick="printDebtStatement(\'' + d.id + '\')">🖨️ كشف حساب</button>' +
-          '<button class="btn btn-danger" type="button" onclick="deleteDebtor(\'' + d.id + '\')">حذف السجل</button>' +
+          '<button class="btn btn-danger" type="button" onclick="deleteDebtor(\'' + d.id + '\')">حذف كل السجل</button>' +
         '</div>' +
       '</div>';
   });
@@ -5790,4 +5887,3 @@ if(initCloud()){
 </script>
 </body>
 </html>
-
